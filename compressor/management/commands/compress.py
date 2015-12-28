@@ -2,25 +2,18 @@
 import os
 import sys
 
+from collections import OrderedDict
 from fnmatch import fnmatch
 from optparse import make_option
+from importlib import import_module
 
 import django
-from django.core.management.base import NoArgsCommand, CommandError
+from django.core.management.base import BaseCommand, CommandError
 import django.template
 from django.template import Context
 from django.utils import six
-
-try:
-    from collections import OrderedDict
-except ImportError:
-    from django.utils.datastructures import SortedDict as OrderedDict
-
-try:
-    from importlib import import_module
-except:
-    from django.utils.importlib import import_module
 from django.template.loader import get_template  # noqa Leave this in to preload template locations
+from django.template import engines
 
 from compressor.cache import get_offline_hexdigest, write_offline_manifest
 from compressor.conf import settings
@@ -40,9 +33,9 @@ else:
         from StringIO import StringIO
 
 
-class Command(NoArgsCommand):
+class Command(BaseCommand):
     help = "Compress content outside of the request/response cycle"
-    option_list = NoArgsCommand.option_list + (
+    option_list = BaseCommand.option_list + (
         make_option('--extension', '-e', action='append', dest='extensions',
             help='The file extension(s) to examine (default: ".html", '
                 'separate multiple extensions with commas, or use -e '
@@ -61,30 +54,11 @@ class Command(NoArgsCommand):
     )
 
     def get_loaders(self):
-        if django.VERSION < (1, 8):
-            from django.template.loader import template_source_loaders
-            if template_source_loaders is None:
-                try:
-                    from django.template.loader import (
-                        find_template as finder_func)
-                except ImportError:
-                    from django.template.loader import (
-                        find_template_source as finder_func)  # noqa
-                try:
-                    # Force django to calculate template_source_loaders from
-                    # TEMPLATE_LOADERS settings, by asking to find a dummy template
-                    source, name = finder_func('test')
-                except django.template.TemplateDoesNotExist:
-                    pass
-                # Reload template_source_loaders now that it has been calculated ;
-                # it should contain the list of valid, instanciated template loaders
-                # to use.
-                from django.template.loader import template_source_loaders
-        else:
-            from django.template import engines
-            template_source_loaders = []
-            for e in engines.all():
-                template_source_loaders.extend(e.engine.get_template_loaders(e.engine.loaders))
+        template_source_loaders = []
+        for e in engines.all():
+            if hasattr(e, 'engine'):
+                template_source_loaders.extend(
+                    e.engine.get_template_loaders(e.engine.loaders))
         loaders = []
         # If template loader is CachedTemplateLoader, return the loaders
         # that it wraps around. So if we have
@@ -126,6 +100,7 @@ class Command(NoArgsCommand):
         The result is cached with a cache-key derived from the content of the
         compress nodes (not the content of the possibly linked files!).
         """
+        engine = options.get("engine", "django")
         extensions = options.get('extensions')
         extensions = self.handle_extensions(extensions or ['html'])
         verbosity = int(options.get("verbosity", 0))
@@ -135,34 +110,44 @@ class Command(NoArgsCommand):
             raise OfflineGenerationError("No template loaders defined. You "
                                          "must set TEMPLATE_LOADERS in your "
                                          "settings.")
-        paths = set()
-        for loader in self.get_loaders():
-            try:
-                module = import_module(loader.__module__)
-                get_template_sources = getattr(module,
-                    'get_template_sources', None)
-                if get_template_sources is None:
-                    get_template_sources = loader.get_template_sources
-                paths.update(list(get_template_sources('')))
-            except (ImportError, AttributeError, TypeError):
-                # Yeah, this didn't work out so well, let's move on
-                pass
-        if not paths:
-            raise OfflineGenerationError("No template paths found. None of "
-                                         "the configured template loaders "
-                                         "provided template paths. See "
-                                         "https://docs.djangoproject.com/en/1.8/topics/templates/ "
-                                         "for more information on template "
-                                         "loaders.")
-        if verbosity > 1:
-            log.write("Considering paths:\n\t" + "\n\t".join(paths) + "\n")
         templates = set()
-        for path in paths:
-            for root, dirs, files in os.walk(path,
-                    followlinks=options.get('followlinks', False)):
-                templates.update(os.path.join(root, name)
-                    for name in files if not name.startswith('.') and
-                        any(fnmatch(name, "*%s" % glob) for glob in extensions))
+        if engine == 'django':
+            paths = set()
+            for loader in self.get_loaders():
+                try:
+                    module = import_module(loader.__module__)
+                    get_template_sources = getattr(module,
+                        'get_template_sources', None)
+                    if get_template_sources is None:
+                        get_template_sources = loader.get_template_sources
+                    paths.update(str(origin) for origin in get_template_sources(''))
+                except (ImportError, AttributeError, TypeError):
+                    # Yeah, this didn't work out so well, let's move on
+                    pass
+
+            if not paths:
+                raise OfflineGenerationError("No template paths found. None of "
+                                             "the configured template loaders "
+                                             "provided template paths. See "
+                                             "https://docs.djangoproject.com/en/1.8/topics/templates/ "
+                                             "for more information on template "
+                                             "loaders.")
+            if verbosity > 1:
+                log.write("Considering paths:\n\t" + "\n\t".join(paths) + "\n")
+
+            for path in paths:
+                for root, dirs, files in os.walk(path,
+                        followlinks=options.get('followlinks', False)):
+                    templates.update(os.path.join(root, name)
+                        for name in files if not name.startswith('.') and
+                            any(fnmatch(name, "*%s" % glob) for glob in extensions))
+        elif engine == 'jinja2' and django.VERSION >= (1, 8):
+            env = settings.COMPRESS_JINJA2_GET_ENVIRONMENT()
+            if env and hasattr(env, 'list_templates'):
+                templates |= set([env.loader.get_source(env, template)[1] for template in
+                            env.list_templates(filter_func=lambda _path:
+                            os.path.splitext(_path)[-1] in extensions)])
+
         if not templates:
             raise OfflineGenerationError("No templates found. Make sure your "
                                          "TEMPLATE_LOADERS and TEMPLATE_DIRS "
@@ -170,9 +155,7 @@ class Command(NoArgsCommand):
         if verbosity > 1:
             log.write("Found templates:\n\t" + "\n\t".join(templates) + "\n")
 
-        engine = options.get("engine", "django")
         parser = self.__get_parser(engine)
-
         compressor_nodes = OrderedDict()
         for template_name in templates:
             try:
@@ -289,7 +272,7 @@ class Command(NoArgsCommand):
                 ext_list[i] = '.%s' % ext_list[i]
         return set(ext_list)
 
-    def handle_noargs(self, **options):
+    def handle(self, **options):
         if not settings.COMPRESS_ENABLED and not options.get("force"):
             raise CommandError(
                 "Compressor is disabled. Set the COMPRESS_ENABLED "
@@ -302,7 +285,5 @@ class Command(NoArgsCommand):
         self.compress(sys.stdout, **options)
 
 
-if django.VERSION < (1, 7):
-    Command.requires_model_validation = False
-else:
-    Command.requires_system_checks = False
+
+Command.requires_system_checks = False
