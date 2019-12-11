@@ -192,6 +192,7 @@ class Command(BaseCommand):
         offline_manifest = OrderedDict()
         results = []
         for context_dict in contexts:
+            contexts_count += 1
             compressor_nodes = OrderedDict()
             for template in fine_templates:
                 context = Context(parser.get_init_context(context_dict))
