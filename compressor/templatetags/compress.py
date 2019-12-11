@@ -12,7 +12,7 @@ register = template.Library()
 
 OUTPUT_FILE = 'file'
 OUTPUT_INLINE = 'inline'
-OUTPUT_MODES = (OUTPUT_FILE, OUTPUT_INLINE)
+OUTPUT_MODES = (OUTPUT_FILE, OUTPUT_INLINE, 'allbiz', 'preloadcss', 'satellite', 'varvy', 'loadcss')
 
 
 class CompressorMixin(object):
