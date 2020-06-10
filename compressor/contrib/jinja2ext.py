@@ -51,6 +51,9 @@ class CompressorExtension(compress.CompressorMixin, Extension):
                     namearg = const(parser.parse_expression())
             elif modearg.value == compress.OUTPUT_INLINE or modearg.value == compress.OUTPUT_PRELOAD:
                 pass
+            elif hasattr(self.compressor_cls(kindarg.value), "output_%s" % modearg.value):
+                # allows custom output methods by using custom CSS/JS compressor class
+                pass
             else:
                 raise TemplateSyntaxError(
                     'Compress mode may be one of: %r, got %r' % (
